@@ -10,7 +10,8 @@ import torch
 import torch.nn as nn
 import torchaudio
 from torch.utils.data import Dataset, DataLoader
-from torch.optim import Adam
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from datasets import load_dataset
 
 from transfusion_pytorch import Transfusion
@@ -19,9 +20,9 @@ from transfusion_pytorch import Transfusion
 
 # Audio
 SAMPLE_RATE = 16000 # 16kHz 
-N_MELS = 64 # divide the frequency range into 64 bins; may lose fine-grained frequency information. If we try to invert this back to audio, it might sound slightly robotic or smeary (configurable).
+N_MELS = 80 # 80 mel bins - standard for speech/audio models (matches Tacotron, Whisper, etc.)
 HOP_LENGTH = 256 # overlap between consecutive mel bins, 256/16000 = 16 ms.
-LATENT_DIM = 64 # latent dimension
+LATENT_DIM = 128 # latent dimension - enough capacity to capture audio nuances
 MIN_AUDIO_DURATION = 0.5 # minimum audio duration
 MAX_AUDIO_DURATION = 4.0 # maximum audio duration
 VARIABLE_LENGTH = True # whether to use variable length audio
@@ -34,17 +35,19 @@ and has a feature dimension of 64 (n_mels).
 '''
 
 # Training
-BATCH_SIZE = 8
-NUM_TRAIN_STEPS = 20_000
-SAMPLE_EVERY = 500
-LEARNING_RATE = 3e-4
+BATCH_SIZE = 4  # Reduced for larger model - increase if you have more VRAM
+NUM_TRAIN_STEPS = 50_000  # More steps for convergence
+SAMPLE_EVERY = 1000
+CHECKPOINT_EVERY = 5000  # Save checkpoint every N steps
+LEARNING_RATE = 1e-4  # Lower LR for stability with larger model
+GRAD_ACCUM_STEPS = 2  # Effective batch size = 4 * 2 = 8
 
 # Dataset (configs: "dev", "clean", "other", "all")
 # Splits: "dev.clean", "dev.other", "test.clean", "test.other",
 #         "train.clean.100", "train.clean.360", "train.other.500"
-DATASET_CONFIG = "dev"
-DATASET_SPLIT = "dev.clean"
-MAX_DATASET_SAMPLES = 1000  # Set to None for full dataset
+DATASET_CONFIG = "clean"  # Use clean training data
+DATASET_SPLIT = "train.clean.100"  # ~28k utterances, ~100 hours
+MAX_DATASET_SAMPLES = None  # Use full dataset for real training
 
 
 rmtree('./results_audio', ignore_errors=True)
@@ -112,17 +115,23 @@ class MelSpectrogramDecoder(nn.Module):
 
 
 model = Transfusion(
-    num_text_tokens=0, # audio only model, no text tokens
+    num_text_tokens=0,  # audio only model, no text tokens
     dim_latent=LATENT_DIM,
     channel_first_latent=True,
     modality_default_shape=(MAX_AUDIO_FRAMES,),
-    modality_encoder=MelSpectrogramEncoder(),
-    modality_decoder=MelSpectrogramDecoder(),
+    modality_encoder=MelSpectrogramEncoder(n_mels=N_MELS, latent_dim=LATENT_DIM),
+    modality_decoder=MelSpectrogramDecoder(n_mels=N_MELS, latent_dim=LATENT_DIM),
     add_pos_emb=True,
     modality_num_dim=1,
     velocity_consistency_loss_weight=0.1,
     model_output_clean=True,
-    transformer=dict(dim=128, depth=6, dim_head=32, heads=4, attn_laser=False),
+    transformer=dict(
+        dim=384,        # Larger model dimension
+        depth=12,       # Deeper network for better representations
+        dim_head=64,    # Standard head dimension
+        heads=6,        # 6 heads * 64 = 384 (matches dim)
+        attn_laser=True,  # Enable LASER attention for better convergence
+    ),
 )
 
 ema_model = model.create_ema(beta=0.995)
@@ -233,7 +242,8 @@ else:
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
 iter_dl = cycle(dataloader)
-optimizer = Adam(model.parameters(), lr=LEARNING_RATE)
+optimizer = AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
+scheduler = CosineAnnealingLR(optimizer, T_max=NUM_TRAIN_STEPS, eta_min=LEARNING_RATE * 0.1)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = model.to(device)
@@ -245,27 +255,36 @@ print(f"Starting training for {NUM_TRAIN_STEPS} steps...")
 
 for step in range(1, NUM_TRAIN_STEPS + 1):
     model.train()
-    batch = next(iter_dl)
+    accum_loss = 0.0
+    
+    for accum_step in range(GRAD_ACCUM_STEPS):
+        batch = next(iter_dl)
 
-    if VARIABLE_LENGTH:
-        batch = [[item.to(device) for item in sample] for sample in batch]
-    else:
-        batch = batch.to(device)
+        if VARIABLE_LENGTH:
+            batch = [[item.to(device) for item in sample] for sample in batch]
+        else:
+            batch = batch.to(device)
 
-    loss = model(batch, velocity_consistency_ema_model=ema_model)
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        loss = model(batch, velocity_consistency_ema_model=ema_model)
+        loss = loss / GRAD_ACCUM_STEPS  # Scale loss for accumulation
+        loss.backward()
+        accum_loss += loss.item()
+
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
+    scheduler.step()
     optimizer.zero_grad()
     ema_model.update()
 
-    if step % 50 == 0:
-        print(f'Step {step}/{NUM_TRAIN_STEPS}: loss={loss.item():.4f}')
+    if step % 100 == 0:
+        lr = scheduler.get_last_lr()[0]
+        print(f'Step {step}/{NUM_TRAIN_STEPS}: loss={accum_loss:.4f}, lr={lr:.2e}')
 
     if step % SAMPLE_EVERY == 0:
         print(f"\n--- Generating sample at step {step} ---")
+        model.eval()
         with torch.no_grad():
-            generated_mel = ema_model.generate_modality_only(batch_size=4, modality_steps=32)
+            generated_mel = ema_model.generate_modality_only(batch_size=4, modality_steps=64)
 
         save_mel_spectrogram(generated_mel[0], results_folder / f'mel_step_{step}.png',
                              title=f'Generated Mel Spectrogram - Step {step}')
@@ -277,16 +296,41 @@ for step in range(1, NUM_TRAIN_STEPS + 1):
 
         print(f"Saved samples to {results_folder}\n")
 
+    # Save checkpoint
+    if step % CHECKPOINT_EVERY == 0:
+        checkpoint = {
+            'step': step,
+            'model_state_dict': model.state_dict(),
+            'ema_model_state_dict': ema_model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'loss': accum_loss,
+        }
+        torch.save(checkpoint, results_folder / f'checkpoint_step_{step}.pt')
+        print(f"Saved checkpoint at step {step}")
+
 print("\n" + "=" * 50)
 print("Training complete!")
 print(f"Results saved to: {results_folder}")
 print("=" * 50)
 
+# Save final checkpoint
+final_checkpoint = {
+    'step': NUM_TRAIN_STEPS,
+    'model_state_dict': model.state_dict(),
+    'ema_model_state_dict': ema_model.state_dict(),
+    'optimizer_state_dict': optimizer.state_dict(),
+    'scheduler_state_dict': scheduler.state_dict(),
+}
+torch.save(final_checkpoint, results_folder / 'checkpoint_final.pt')
+print(f"Saved final checkpoint")
+
 # Final generation
 print("\nGenerating final high-quality samples...")
 
+model.eval()
 with torch.no_grad():
-    final_samples = ema_model.generate_modality_only(batch_size=4, modality_steps=64)
+    final_samples = ema_model.generate_modality_only(batch_size=4, modality_steps=128)  # More steps for quality
 
 for i, mel in enumerate(final_samples):
     save_mel_spectrogram(mel, results_folder / f'final_sample_{i}_max_length.png',
@@ -299,7 +343,7 @@ if VARIABLE_LENGTH:
     for duration in [0.5, 1.0, 2.0, 3.0]:
         target_frames = max(MIN_AUDIO_FRAMES, min(MAX_AUDIO_FRAMES, _get_mel_frames(duration)))
         with torch.no_grad():
-            sample = ema_model.generate_modality_only(batch_size=1, fixed_modality_shape=(target_frames,), modality_steps=64)
+            sample = ema_model.generate_modality_only(batch_size=1, fixed_modality_shape=(target_frames,), modality_steps=128)
         save_mel_spectrogram(sample[0], results_folder / f'final_sample_{duration:.1f}s.png',
                              title=f'Generated Audio ({duration:.1f}s, {target_frames} frames)')
         print(f"  Generated {duration:.1f}s audio ({target_frames} frames)")
