@@ -220,6 +220,53 @@ def save_mel_spectrogram(mel, path, title="Generated Mel Spectrogram"):
     except ImportError:
         print("matplotlib not installed, skipping visualization")
 
+
+def mel_to_audio_griffin_lim(mel_spectrogram, n_fft=1024, hop_length=HOP_LENGTH, 
+                              n_mels=N_MELS, sample_rate=SAMPLE_RATE, n_iter=64):
+    """Convert mel spectrogram to audio using Griffin-Lim algorithm."""
+    device = mel_spectrogram.device
+    
+    if mel_spectrogram.dim() == 2:
+        mel_spectrogram = mel_spectrogram.unsqueeze(0)
+        squeeze = True
+    else:
+        squeeze = False
+    
+    mel_basis = torchaudio.functional.melscale_fbanks(
+        n_freqs=n_fft // 2 + 1, f_min=0.0, f_max=sample_rate / 2,
+        n_mels=n_mels, sample_rate=sample_rate,
+    ).to(device)
+    
+    mel_basis_pinv = torch.linalg.pinv(mel_basis.T)
+    
+    audios = []
+    for mel in mel_spectrogram:
+        mel_denorm = mel * 4.0
+        mel_linear = torch.exp(mel_denorm)
+        linear_spec = torch.matmul(mel_basis_pinv, mel_linear)
+        linear_spec = torch.clamp(linear_spec, min=1e-5)
+        
+        griffin_lim = torchaudio.transforms.GriffinLim(
+            n_fft=n_fft, hop_length=hop_length, power=1.0, n_iter=n_iter,
+        ).to(device)
+        
+        audio = griffin_lim(linear_spec)
+        audios.append(audio)
+    
+    result = torch.stack(audios)
+    return result.squeeze(0) if squeeze else result
+
+
+def save_audio(audio, path, sample_rate=SAMPLE_RATE):
+    """Save audio tensor to wav file."""
+    audio = audio.cpu()
+    if audio.abs().max() > 0:
+        audio = audio / audio.abs().max() * 0.95
+    if audio.dim() == 1:
+        audio = audio.unsqueeze(0)
+    torchaudio.save(str(path), audio, sample_rate)
+    print(f"  Saved audio: {path}")
+
 # training setup
 
 print("\n" + "=" * 50)
@@ -294,6 +341,13 @@ for step in range(1, NUM_TRAIN_STEPS + 1):
             save_mel_spectrogram(grid, results_folder / f'mel_grid_step_{step}.png',
                                  title=f'Generated Samples Grid - Step {step}')
 
+        # Convert to audio and save
+        try:
+            audio = mel_to_audio_griffin_lim(generated_mel[0])
+            save_audio(audio, results_folder / f'audio_step_{step}.wav')
+        except Exception as e:
+            print(f"  Audio conversion failed: {e}")
+
         print(f"Saved samples to {results_folder}\n")
 
     # Save checkpoint
@@ -335,6 +389,12 @@ with torch.no_grad():
 for i, mel in enumerate(final_samples):
     save_mel_spectrogram(mel, results_folder / f'final_sample_{i}_max_length.png',
                          title=f'Final Sample {i} ({MAX_AUDIO_FRAMES} frames)')
+    # Save audio
+    try:
+        audio = mel_to_audio_griffin_lim(mel)
+        save_audio(audio, results_folder / f'final_sample_{i}.wav')
+    except Exception as e:
+        print(f"  Audio conversion failed for sample {i}: {e}")
 
 print(f"Saved {len(final_samples)} samples at max length ({MAX_AUDIO_FRAMES} frames)")
 
@@ -346,6 +406,20 @@ if VARIABLE_LENGTH:
             sample = ema_model.generate_modality_only(batch_size=1, fixed_modality_shape=(target_frames,), modality_steps=128)
         save_mel_spectrogram(sample[0], results_folder / f'final_sample_{duration:.1f}s.png',
                              title=f'Generated Audio ({duration:.1f}s, {target_frames} frames)')
+        # Save audio
+        try:
+            audio = mel_to_audio_griffin_lim(sample[0])
+            save_audio(audio, results_folder / f'final_sample_{duration:.1f}s.wav')
+        except Exception as e:
+            print(f"  Audio conversion failed: {e}")
         print(f"  Generated {duration:.1f}s audio ({target_frames} frames)")
 
 print(f"\nAll results saved to: {results_folder}")
+
+# Playback instructions
+print("\n" + "=" * 50)
+print("To listen to generated audio:")
+print("=" * 50)
+print(f"  # macOS:  afplay {results_folder}/final_sample_0.wav")
+print(f"  # Linux:  aplay {results_folder}/final_sample_0.wav")
+print(f"  # Or open .wav files in any audio player")
