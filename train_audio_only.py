@@ -17,10 +17,26 @@ import wandb
 # === Config ===
 SAMPLE_RATE, N_MELS, HOP_LENGTH, LATENT_DIM = 16000, 80, 256, 128
 MIN_DURATION, MAX_DURATION = 0.5, 4.0
-BATCH_SIZE, STEPS, LR, ACCUM = 4, 50_000, 1e-4, 2
-SAMPLE_EVERY, CKPT_EVERY = 1000, 5000
-DATASET_SPLIT = "train.clean.100"
-USE_WANDB = wandb is not None
+# === Test mode (set to False for full training on GPU server) ===
+TEST_MODE = False  # <-- Set to False for GPU server
+
+if TEST_MODE:
+    BATCH_SIZE, STEPS, LR, ACCUM = 2, 100, 1e-4, 1
+    SAMPLE_EVERY, CKPT_EVERY = 50, 100
+    DATASET_SPLIT = "dev.clean"  # smallest split
+    MAX_SAMPLES = 50  # only use 50 samples for quick testing
+    USE_WANDB = False
+else:
+    # === GPU Server Settings ===
+    BATCH_SIZE = 8          # Increase if GPU has more VRAM (A100: 16-32, V100: 8-16)
+    STEPS = 50_000          # Total training steps
+    LR = 1e-4               # Learning rate
+    ACCUM = 2               # Gradient accumulation (effective batch = BATCH_SIZE * ACCUM)
+    SAMPLE_EVERY = 1000     # Generate sample audio every N steps
+    CKPT_EVERY = 5000       # Save checkpoint every N steps
+    DATASET_SPLIT = "train.clean"  # Full training set (~29k samples)
+    MAX_SAMPLES = None      # Use all samples
+    USE_WANDB = wandb is not None  # Enable wandb logging
 
 results = Path('./results_audio')
 results.mkdir(exist_ok=True, parents=True)
@@ -61,19 +77,46 @@ class MelDecoder(nn.Module):
 
 # === Dataset ===
 class LibriTTS(Dataset):
-    def __init__(self, split=DATASET_SPLIT):
-        self.ds = load_dataset("mythicinfinity/libritts", "clean", split=split)
+    def __init__(self, split=DATASET_SPLIT, max_samples=MAX_SAMPLES):
+        print(f"Loading LibriTTS {split}..." + (" (streaming)" if max_samples else ""))
         self.resample = torchaudio.transforms.Resample(24000, SAMPLE_RATE)
         min_s, max_s = int(MIN_DURATION * 24000), int(MAX_DURATION * 24000)
-        self.idx = [i for i, s in enumerate(self.ds) if min_s <= len(s['audio']['array']) <= max_s]
-        print(f"Dataset: {len(self.idx)} samples")
+        
+        if max_samples:
+            # Streaming mode: only download what we need
+            ds_stream = load_dataset("mythicinfinity/libritts", "clean", split=split, streaming=True)
+            self.samples = []
+            for sample in ds_stream:
+                arr = sample['audio']['array']
+                if min_s <= len(arr) <= max_s:
+                    self.samples.append(arr)
+                if len(self.samples) >= max_samples:
+                    break
+            print(f"Dataset: {len(self.samples)} samples (streamed)")
+        else:
+            # Full mode: download entire dataset
+            self.ds = load_dataset("mythicinfinity/libritts", "clean", split=split)
+            self.idx = [i for i, s in enumerate(self.ds) if min_s <= len(s['audio']['array']) <= max_s]
+            self.samples = None
+            print(f"Dataset: {len(self.idx)} samples")
 
-    def __len__(self): return len(self.idx)
+    def __len__(self): 
+        return len(self.samples) if self.samples is not None else len(self.idx)
     
     def __getitem__(self, i):
-        wav = torch.tensor(self.ds[self.idx[i]]['audio']['array'], dtype=torch.float32)
+        if self.samples is not None:
+            wav = torch.tensor(self.samples[i], dtype=torch.float32)
+        else:
+            wav = torch.tensor(self.ds[self.idx[i]]['audio']['array'], dtype=torch.float32)
         wav = self.resample(wav)
         if wav.abs().max() > 0: wav = wav / wav.abs().max()
+        
+        # Pad/trim to fixed length so all mel spectrograms have MAX_FRAMES
+        target_len = int(MAX_DURATION * SAMPLE_RATE)
+        if wav.shape[0] < target_len:
+            wav = torch.nn.functional.pad(wav, (0, target_len - wav.shape[0]))
+        else:
+            wav = wav[:target_len]
         return [wav]
 
 
@@ -133,7 +176,7 @@ for step in range(1, STEPS + 1):
     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     opt.step(); sched.step(); opt.zero_grad(); ema.update()
     
-    if step % 100 == 0:
+    if step % (10 if TEST_MODE else 100) == 0:
         print(f'[{step}/{STEPS}] loss={loss_acc:.4f} lr={sched.get_last_lr()[0]:.2e}')
         if USE_WANDB: wandb.log({"loss": loss_acc, "lr": sched.get_last_lr()[0]}, step=step)
     

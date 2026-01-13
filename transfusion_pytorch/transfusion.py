@@ -44,7 +44,20 @@ from axial_positional_embedding import ContinuousAxialPositionalEmbedding
 
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
-from hyper_connections import HyperConnections
+try:
+    from hyper_connections import HyperConnections
+except ImportError:
+    # Simple fallback for num_residual_streams=1
+    class HyperConnections:
+        @staticmethod
+        def get_init_and_expand_reduce_stream_functions(num_streams, num_fracs=4):
+            assert num_streams == 1, "Install hyper-connections for num_residual_streams > 1"
+            class SimpleResidual(Module):
+                def __init__(self, dim, layer_index=0): 
+                    super().__init__()
+                def forward(self, x): 
+                    return x, lambda y: x + y
+            return lambda dim, layer_index: SimpleResidual(dim, layer_index), lambda x: x, lambda x: x
 
 from tqdm import tqdm
 from loguru import logger
@@ -75,7 +88,10 @@ try:
     from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
     if torch.cuda.is_available():
-        flex_attention = torch.compile(flex_attention)
+        try:
+            flex_attention = torch.compile(flex_attention)
+        except RuntimeError:
+            pass  # torch.compile not supported on Python 3.14+
 
 except ImportError:
     flex_attention = None

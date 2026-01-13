@@ -4,7 +4,7 @@ version = "0.14.5"
 description = "Transfusion in Pytorch"
 
 readme = "README.md"
-requires-python = ">= 3.12"
+requires-python = ">= 3.10, < 3.14"
 license = { file = "LICENSE" }
 keywords = [
     'artificial intelligence',
@@ -52,8 +52,9 @@ examples = [
 ]
 
 audio = [
-    "datasets",
+    "datasets[audio]",
     "torchaudio",
+    "soundfile",
     "wandb",
     "matplotlib",
 ]
