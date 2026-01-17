@@ -58,11 +58,18 @@ class MelEncoder(nn.Module):
             nn.Conv1d(LATENT_DIM * 2, LATENT_DIM, 3, padding=1))
 
     def forward(self, x):
-        if x.dim() == 1: x = x.unsqueeze(0)
+        squeeze = x.dim() == 1
+        if squeeze: x = x.unsqueeze(0)
         m = self.mel(x)
         m = torch.log(m.clamp(min=1e-5))
         m = (m - m.mean(dim=(1,2), keepdim=True)) / (m.std(dim=(1,2), keepdim=True) + 1e-5)
-        return self.proj(m).squeeze(0) if x.shape[0] == 1 else self.proj(m)
+        out = self.proj(m)
+        # Ensure exact output shape (pad/trim to MAX_FRAMES)
+        if out.shape[-1] < MAX_FRAMES:
+            out = torch.nn.functional.pad(out, (0, MAX_FRAMES - out.shape[-1]))
+        elif out.shape[-1] > MAX_FRAMES:
+            out = out[..., :MAX_FRAMES]
+        return out.squeeze(0) if squeeze else out
 
 
 class MelDecoder(nn.Module):
@@ -157,14 +164,27 @@ sched = CosineAnnealingLR(opt, T_max=STEPS, eta_min=LR * 0.1)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model, ema = model.to(device), ema.to(device)
 
+# Resume from checkpoint if available
+start_step = 1
+ckpts = sorted(results.glob('ckpt_*.pt'), key=lambda p: int(p.stem.split('_')[1]))
+if ckpts:
+    latest = ckpts[-1]
+    print(f"Resuming from {latest}...")
+    ckpt = torch.load(latest, map_location=device)
+    model.load_state_dict(ckpt['model'])
+    ema.load_state_dict(ckpt['ema'])
+    opt.load_state_dict(ckpt['opt'])
+    sched.load_state_dict(ckpt['sched'])
+    start_step = ckpt['step'] + 1
+
 if USE_WANDB:
     wandb.init(project="transfusion-audio", config={
         "steps": STEPS, "batch": BATCH_SIZE * ACCUM, "lr": LR, 
-        "params": sum(p.numel() for p in model.parameters())})
+        "params": sum(p.numel() for p in model.parameters())}, resume="allow")
 
-print(f"Training on {device} for {STEPS} steps...")
+print(f"Training on {device} for {STEPS} steps (starting from step {start_step})...")
 
-for step in range(1, STEPS + 1):
+for step in range(start_step, STEPS + 1):
     model.train()
     loss_acc = 0
     for _ in range(ACCUM):
