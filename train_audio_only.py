@@ -15,7 +15,7 @@ from transfusion_pytorch import Transfusion
 import wandb
 
 # === Config ===
-SAMPLE_RATE, N_MELS, HOP_LENGTH, LATENT_DIM = 16000, 80, 256, 128
+SAMPLE_RATE, N_MELS, HOP_LENGTH, LATENT_DIM = 16000, 80, 256, 256  # Increased latent dim for larger model
 MIN_DURATION, MAX_DURATION = 0.5, 4.0
 # === Test mode (set to False for full training on GPU server) ===
 TEST_MODE = False  # <-- Set to False for GPU server
@@ -27,11 +27,11 @@ if TEST_MODE:
     MAX_SAMPLES = 50  # only use 50 samples for quick testing
     USE_WANDB = False
 else:
-    # === GPU Server Settings ===
-    BATCH_SIZE = 8          # Increase if GPU has more VRAM (A100: 16-32, V100: 8-16)
+    # === GPU Server Settings (scaled model ~150M params) ===
+    BATCH_SIZE = 4          # Reduced for larger model (A100: 8-16, V100: 4-8)
     STEPS = 50_000          # Total training steps
-    LR = 1e-4               # Learning rate
-    ACCUM = 2               # Gradient accumulation (effective batch = BATCH_SIZE * ACCUM)
+    LR = 5e-5               # Lower LR for larger model
+    ACCUM = 4               # Gradient accumulation (effective batch = 16)
     SAMPLE_EVERY = 1000     # Generate sample audio every N steps
     CKPT_EVERY = 5000       # Save checkpoint every N steps
     DATASET_SPLIT = "train.clean"  # Full training set (~29k samples)
@@ -47,14 +47,15 @@ def get_frames(dur):
 MAX_FRAMES = get_frames(MAX_DURATION)
 
 
-# === Encoder/Decoder ===
+# === Encoder/Decoder (deeper for larger model) ===
 class MelEncoder(nn.Module):
     def __init__(self):
         super().__init__()
         self.mel = torchaudio.transforms.MelSpectrogram(
             sample_rate=SAMPLE_RATE, n_fft=1024, hop_length=HOP_LENGTH, n_mels=N_MELS, normalized=True)
         self.proj = nn.Sequential(
-            nn.Conv1d(N_MELS, LATENT_DIM * 2, 3, padding=1), nn.GELU(),
+            nn.Conv1d(N_MELS, LATENT_DIM, 3, padding=1), nn.GELU(),
+            nn.Conv1d(LATENT_DIM, LATENT_DIM * 2, 3, padding=1), nn.GELU(),
             nn.Conv1d(LATENT_DIM * 2, LATENT_DIM, 3, padding=1))
 
     def forward(self, x):
@@ -77,7 +78,8 @@ class MelDecoder(nn.Module):
         super().__init__()
         self.proj = nn.Sequential(
             nn.Conv1d(LATENT_DIM, LATENT_DIM * 2, 3, padding=1), nn.GELU(),
-            nn.Conv1d(LATENT_DIM * 2, N_MELS, 3, padding=1))
+            nn.Conv1d(LATENT_DIM * 2, LATENT_DIM, 3, padding=1), nn.GELU(),
+            nn.Conv1d(LATENT_DIM, N_MELS, 3, padding=1))
 
     def forward(self, x): return self.proj(x)
 
@@ -133,7 +135,8 @@ model = Transfusion(
     modality_default_shape=(MAX_FRAMES,), modality_encoder=MelEncoder(),
     modality_decoder=MelDecoder(), add_pos_emb=True, modality_num_dim=1,
     velocity_consistency_loss_weight=0.1, model_output_clean=True,
-    transformer=dict(dim=384, depth=12, dim_head=64, heads=6, attn_laser=True),
+    # Scaled up model (~150M params) for better audio quality
+    transformer=dict(dim=768, depth=18, dim_head=64, heads=12, attn_laser=True),
 )
 ema = model.create_ema(0.995)
 print(f"Params: {sum(p.numel() for p in model.parameters()):,}")
