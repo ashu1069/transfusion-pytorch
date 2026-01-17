@@ -1,6 +1,6 @@
 """
 Train Transfusion on audio-only generation using LibriTTS dataset.
-Run: uv run --extra audio train_audio_only.py
+Run: uv run train_audio_only.py
 """
 
 from pathlib import Path

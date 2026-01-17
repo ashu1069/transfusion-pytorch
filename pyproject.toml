@@ -32,7 +32,13 @@ dependencies = [
     'rotary_embedding_torch>=0.8.4',
     'torchdiffeq',
     'torch>=2.0',
-    'tqdm'
+    'tqdm',
+    # Audio dependencies
+    'datasets[audio]',
+    'torchaudio',
+    'soundfile',
+    'wandb',
+    'matplotlib',
 ]
 
 [project.urls]
