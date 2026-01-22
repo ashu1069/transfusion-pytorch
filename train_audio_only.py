@@ -89,27 +89,30 @@ class MelDecoder(nn.Module):
 # === Dataset ===
 import soundfile as sf
 import io
+from datasets import Audio
 
 class LibriTTS(Dataset):
     def __init__(self, split=DATASET_SPLIT, max_samples=MAX_SAMPLES):
         print(f"Loading LibriTTS {split}...")
         min_s, max_s = int(MIN_DURATION * SAMPLE_RATE), int(MAX_DURATION * SAMPLE_RATE)
         
-        # Load dataset WITHOUT audio decoding (avoids torchcodec requirement)
+        # Load dataset and DISABLE audio decoding
         ds = load_dataset("mythicinfinity/libritts", "clean", split=split)
+        ds = ds.cast_column("audio", Audio(decode=False))  # Keep as raw bytes
         
-        # Filter by duration using audio bytes length as proxy, then decode valid ones
+        # Filter by duration, decode with soundfile
         self.samples = []
         print("Filtering and decoding audio samples...")
-        for i, sample in enumerate(ds):
+        for i in range(len(ds)):
             try:
-                # Decode audio bytes with soundfile
-                audio_bytes = sample['audio']['bytes']
+                # Get raw audio bytes (not decoded)
+                audio_data = ds[i]['audio']
+                audio_bytes = audio_data['bytes']
                 arr, sr = sf.read(io.BytesIO(audio_bytes))
                 if arr.ndim > 1:  # stereo to mono
                     arr = arr.mean(axis=1)
                 if min_s <= len(arr) <= max_s:
-                    self.samples.append(arr)
+                    self.samples.append(arr.astype('float32'))
                 if max_samples and len(self.samples) >= max_samples:
                     break
             except Exception as e:
@@ -123,7 +126,7 @@ class LibriTTS(Dataset):
         return len(self.samples)
     
     def __getitem__(self, i):
-        wav = torch.tensor(self.samples[i], dtype=torch.float32)
+        wav = torch.from_numpy(self.samples[i])
         # Normalize audio
         if wav.abs().max() > 0: wav = wav / wav.abs().max()
         
