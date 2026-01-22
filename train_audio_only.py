@@ -6,7 +6,7 @@ Run: uv run train_audio_only.py
 from pathlib import Path
 import torch
 import torch.nn as nn
-import torchaudio
+# torchaudio not needed - using Vocos feature extractor for mel
 from torch.utils.data import Dataset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -49,12 +49,20 @@ def get_frames(dur):
 MAX_FRAMES = get_frames(MAX_DURATION)
 
 
-# === Encoder/Decoder (deeper for larger model) ===
+# === Encoder/Decoder using Vocos-compatible mel format ===
+# Vocos expects: log mel in range ~[0, 6], NOT normalized
+
 class MelEncoder(nn.Module):
+    """Encodes waveform to latent via Vocos-compatible log mel spectrogram."""
     def __init__(self):
         super().__init__()
-        self.mel = torchaudio.transforms.MelSpectrogram(
-            sample_rate=SAMPLE_RATE, n_fft=1024, hop_length=HOP_LENGTH, n_mels=N_MELS, normalized=True)
+        # Use Vocos's feature extractor for consistent mel format
+        self.vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
+        self.fe = self.vocoder.feature_extractor
+        # Freeze feature extractor - we just use it for mel extraction
+        for p in self.fe.parameters():
+            p.requires_grad = False
+        # Project mel to latent (mel is already in correct scale for Vocos)
         self.proj = nn.Sequential(
             nn.Conv1d(N_MELS, LATENT_DIM, 3, padding=1), nn.GELU(),
             nn.Conv1d(LATENT_DIM, LATENT_DIM * 2, 3, padding=1), nn.GELU(),
@@ -63,9 +71,9 @@ class MelEncoder(nn.Module):
     def forward(self, x):
         squeeze = x.dim() == 1
         if squeeze: x = x.unsqueeze(0)
-        m = self.mel(x)
-        m = torch.log(m.clamp(min=1e-5))
-        m = (m - m.mean(dim=(1,2), keepdim=True)) / (m.std(dim=(1,2), keepdim=True) + 1e-5)
+        # Use Vocos feature extractor (outputs log mel in correct format)
+        with torch.no_grad():
+            m = self.fe(x)  # Shape: (B, n_mels, T)
         out = self.proj(m)
         # Ensure exact output shape (pad/trim to MAX_FRAMES)
         if out.shape[-1] < MAX_FRAMES:
@@ -76,12 +84,14 @@ class MelEncoder(nn.Module):
 
 
 class MelDecoder(nn.Module):
+    """Decodes latent back to Vocos-compatible log mel spectrogram."""
     def __init__(self):
         super().__init__()
         self.proj = nn.Sequential(
             nn.Conv1d(LATENT_DIM, LATENT_DIM * 2, 3, padding=1), nn.GELU(),
             nn.Conv1d(LATENT_DIM * 2, LATENT_DIM, 3, padding=1), nn.GELU(),
-            nn.Conv1d(LATENT_DIM, N_MELS, 3, padding=1))
+            nn.Conv1d(LATENT_DIM, N_MELS, 3, padding=1),
+            nn.Softplus())  # Ensures positive output in log mel range ~[0, 6]
 
     def forward(self, x): return self.proj(x)
 
@@ -156,10 +166,7 @@ print(f"Params: {sum(p.numel() for p in model.parameters()):,}")
 def cycle(dl):
     while True: yield from dl
 
-# Initialize Vocos vocoder (pretrained on LibriTTS 24kHz)
-vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
-
-def mel_to_audio(mel):
+def mel_to_audio(mel, vocoder):
     """Convert mel spectrogram to audio using Vocos neural vocoder."""
     # Vocos expects (B, C, T) - mel is (C, T) so add batch dim
     if mel.dim() == 2:
@@ -225,7 +232,7 @@ for step in range(start_step, STEPS + 1):
         with torch.no_grad():
             mel = ema.generate_modality_only(batch_size=1, modality_steps=64)[0]
         try:
-            save_audio(mel_to_audio(mel), results / f'audio_{step}.wav')
+            save_audio(mel_to_audio(mel, model.modality_encoder.vocoder), results / f'audio_{step}.wav')
             if USE_WANDB: wandb.log({"audio": wandb.Audio(str(results / f'audio_{step}.wav'), sample_rate=SAMPLE_RATE)}, step=step)
         except Exception as e:
             print(f"Audio failed: {e}")
@@ -239,7 +246,7 @@ torch.save({'model': model.state_dict(), 'ema': ema.state_dict()}, results / 'fi
 model.eval()
 with torch.no_grad():
     for i, mel in enumerate(ema.generate_modality_only(batch_size=4, modality_steps=128)):
-        try: save_audio(mel_to_audio(mel), results / f'final_{i}.wav')
+        try: save_audio(mel_to_audio(mel, model.modality_encoder.vocoder), results / f'final_{i}.wav')
         except: pass
 
 if USE_WANDB: wandb.finish()
