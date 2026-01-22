@@ -12,10 +12,12 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from datasets import load_dataset
 from transfusion_pytorch import Transfusion
+from vocos import Vocos
 import wandb
 
 # === Config ===
-SAMPLE_RATE, N_MELS, HOP_LENGTH, LATENT_DIM = 16000, 80, 256, 256  # Increased latent dim for larger model
+# Config matched to Vocos pretrained vocoder (charactr/vocos-mel-24khz)
+SAMPLE_RATE, N_MELS, HOP_LENGTH, LATENT_DIM = 24000, 100, 256, 256
 MIN_DURATION, MAX_DURATION = 0.5, 4.0
 # === Test mode (set to False for full training on GPU server) ===
 TEST_MODE = False  # <-- Set to False for GPU server
@@ -34,7 +36,7 @@ else:
     ACCUM = 4               # Gradient accumulation (effective batch = 16)
     SAMPLE_EVERY = 1000     # Generate sample audio every N steps
     CKPT_EVERY = 5000       # Save checkpoint every N steps
-    DATASET_SPLIT = "train.clean"  # Full training set (~29k samples)
+    DATASET_SPLIT = "train.clean.100"  # Full training set (~29k samples)
     MAX_SAMPLES = None      # Use all samples
     USE_WANDB = wandb is not None  # Enable wandb logging
 
@@ -88,8 +90,8 @@ class MelDecoder(nn.Module):
 class LibriTTS(Dataset):
     def __init__(self, split=DATASET_SPLIT, max_samples=MAX_SAMPLES):
         print(f"Loading LibriTTS {split}..." + (" (streaming)" if max_samples else ""))
-        self.resample = torchaudio.transforms.Resample(24000, SAMPLE_RATE)
-        min_s, max_s = int(MIN_DURATION * 24000), int(MAX_DURATION * 24000)
+        # LibriTTS is 24kHz, same as our SAMPLE_RATE - no resampling needed
+        min_s, max_s = int(MIN_DURATION * SAMPLE_RATE), int(MAX_DURATION * SAMPLE_RATE)
         
         if max_samples:
             # Streaming mode: only download what we need
@@ -117,7 +119,7 @@ class LibriTTS(Dataset):
             wav = torch.tensor(self.samples[i], dtype=torch.float32)
         else:
             wav = torch.tensor(self.ds[self.idx[i]]['audio']['array'], dtype=torch.float32)
-        wav = self.resample(wav)
+        # Normalize audio
         if wav.abs().max() > 0: wav = wav / wav.abs().max()
         
         # Pad/trim to fixed length so all mel spectrograms have MAX_FRAMES
@@ -146,11 +148,18 @@ print(f"Params: {sum(p.numel() for p in model.parameters()):,}")
 def cycle(dl):
     while True: yield from dl
 
+# Initialize Vocos vocoder (pretrained on LibriTTS 24kHz)
+vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
+
 def mel_to_audio(mel):
-    """Griffin-Lim mel to audio."""
-    basis = torchaudio.functional.melscale_fbanks(513, 0, SAMPLE_RATE/2, N_MELS, SAMPLE_RATE).to(mel.device)
-    spec = torch.matmul(torch.linalg.pinv(basis.T), torch.exp(mel * 4)).clamp(min=1e-5)
-    return torchaudio.transforms.GriffinLim(1024, hop_length=HOP_LENGTH, power=1.0, n_iter=64).to(mel.device)(spec)
+    """Convert mel spectrogram to audio using Vocos neural vocoder."""
+    # Vocos expects (B, C, T) - mel is (C, T) so add batch dim
+    if mel.dim() == 2:
+        mel = mel.unsqueeze(0)
+    vocoder.to(mel.device)
+    with torch.no_grad():
+        audio = vocoder.decode(mel)
+    return audio.squeeze(0)  # Remove batch dim
 
 def save_audio(audio, path):
     audio = audio.cpu()

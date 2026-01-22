@@ -39,6 +39,7 @@ dependencies = [
     'soundfile',
     'wandb',
     'matplotlib',
+    'vocos',  # Neural vocoder for high-quality mel → audio
 ]
 
 [project.urls]
