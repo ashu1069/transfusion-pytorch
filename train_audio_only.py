@@ -170,9 +170,9 @@ def mel_to_audio(mel):
     return audio.squeeze(0)  # Remove batch dim
 
 def save_audio(audio, path):
-    audio = audio.cpu()
-    if audio.abs().max() > 0: audio = audio / audio.abs().max() * 0.95
-    torchaudio.save(str(path), audio.unsqueeze(0) if audio.dim() == 1 else audio, SAMPLE_RATE)
+    audio = audio.cpu().numpy()
+    if abs(audio).max() > 0: audio = audio / abs(audio).max() * 0.95
+    sf.write(str(path), audio, SAMPLE_RATE)
 
 
 # === Training ===
