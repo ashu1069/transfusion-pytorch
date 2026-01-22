@@ -87,38 +87,43 @@ class MelDecoder(nn.Module):
 
 
 # === Dataset ===
+import soundfile as sf
+import io
+
 class LibriTTS(Dataset):
     def __init__(self, split=DATASET_SPLIT, max_samples=MAX_SAMPLES):
-        print(f"Loading LibriTTS {split}..." + (" (streaming)" if max_samples else ""))
-        # LibriTTS is 24kHz, same as our SAMPLE_RATE - no resampling needed
+        print(f"Loading LibriTTS {split}...")
         min_s, max_s = int(MIN_DURATION * SAMPLE_RATE), int(MAX_DURATION * SAMPLE_RATE)
         
-        if max_samples:
-            # Streaming mode: only download what we need
-            ds_stream = load_dataset("mythicinfinity/libritts", "clean", split=split, streaming=True)
-            self.samples = []
-            for sample in ds_stream:
-                arr = sample['audio']['array']
+        # Load dataset WITHOUT audio decoding (avoids torchcodec requirement)
+        ds = load_dataset("mythicinfinity/libritts", "clean", split=split)
+        
+        # Filter by duration using audio bytes length as proxy, then decode valid ones
+        self.samples = []
+        print("Filtering and decoding audio samples...")
+        for i, sample in enumerate(ds):
+            try:
+                # Decode audio bytes with soundfile
+                audio_bytes = sample['audio']['bytes']
+                arr, sr = sf.read(io.BytesIO(audio_bytes))
+                if arr.ndim > 1:  # stereo to mono
+                    arr = arr.mean(axis=1)
                 if min_s <= len(arr) <= max_s:
                     self.samples.append(arr)
-                if len(self.samples) >= max_samples:
+                if max_samples and len(self.samples) >= max_samples:
                     break
-            print(f"Dataset: {len(self.samples)} samples (streamed)")
-        else:
-            # Full mode: download entire dataset
-            self.ds = load_dataset("mythicinfinity/libritts", "clean", split=split)
-            self.idx = [i for i, s in enumerate(self.ds) if min_s <= len(s['audio']['array']) <= max_s]
-            self.samples = None
-            print(f"Dataset: {len(self.idx)} samples")
+            except Exception as e:
+                continue  # Skip problematic files
+            if (i + 1) % 1000 == 0:
+                print(f"  Processed {i+1} files, kept {len(self.samples)} samples")
+        
+        print(f"Dataset: {len(self.samples)} samples")
 
     def __len__(self): 
-        return len(self.samples) if self.samples is not None else len(self.idx)
+        return len(self.samples)
     
     def __getitem__(self, i):
-        if self.samples is not None:
-            wav = torch.tensor(self.samples[i], dtype=torch.float32)
-        else:
-            wav = torch.tensor(self.ds[self.idx[i]]['audio']['array'], dtype=torch.float32)
+        wav = torch.tensor(self.samples[i], dtype=torch.float32)
         # Normalize audio
         if wav.abs().max() > 0: wav = wav / wav.abs().max()
         
