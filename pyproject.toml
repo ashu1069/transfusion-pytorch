@@ -34,12 +34,13 @@ dependencies = [
     'torch>=2.0',
     'tqdm',
     # Audio dependencies
-    'datasets[audio]',
+    'datasets',        # Without [audio] extra to avoid torchcodec
+    'soundfile',       # Audio decoder (used by datasets automatically)
+    'librosa',         # Audio processing (soundfile backend)
     'torchaudio',
-    'soundfile',
     'wandb',
     'matplotlib',
-    'vocos',  # Neural vocoder for high-quality mel → audio
+    'vocos',           # Neural vocoder for high-quality mel → audio
 ]
 
 [project.urls]
