@@ -1,0 +1,62 @@
+_wandb:
+    value:
+        cli_version: 0.23.1
+        e:
+            1p0ju9rrynuih6dxrndmryeweznvc0e9:
+                codePath: train_audio_only.py
+                codePathLocal: train_audio_only.py
+                cpu_count: 8
+                cpu_count_logical: 16
+                cudaVersion: "12.4"
+                disk:
+                    /:
+                        total: "1560765693952"
+                        used: "115191656448"
+                email: ak1825@g.rit.edu
+                executable: /home/ubuntu/transfusion-pytorch/.venv/bin/python3
+                git:
+                    commit: 032e6b844fdb09ef9bbaf475741ddfc3aedfd8cb
+                    remote: https://github.com/ashu1069/transfusion-pytorch.git
+                gpu: NVIDIA H200
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Hopper
+                      cudaCores: 16896
+                      memoryTotal: "150754820096"
+                      name: NVIDIA H200
+                      uuid: GPU-11150273-da0c-f19c-05e2-ce2db9a7e5e8
+                host: computeinstance-e01e903pjsbzcfp4e9
+                memory:
+                    total: "211067039744"
+                os: Linux-5.15.0-164-generic-x86_64-with-glibc2.35
+                program: /home/ubuntu/transfusion-pytorch/train_audio_only.py
+                python: CPython 3.10.12
+                root: /home/ubuntu/transfusion-pytorch
+                startedAt: "2026-01-22T20:00:19.813943Z"
+                writerId: 1p0ju9rrynuih6dxrndmryeweznvc0e9
+        m: []
+        python_version: 3.10.12
+        t:
+            "1":
+                - 1
+                - 49
+                - 51
+            "2":
+                - 1
+                - 49
+                - 51
+            "3":
+                - 16
+                - 61
+            "4": 3.10.12
+            "5": 0.23.1
+            "12": 0.23.1
+            "13": linux-x86_64
+batch:
+    value: 16
+lr:
+    value: 5e-05
+params:
+    value: 401608528
+steps:
+    value: 50000

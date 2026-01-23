@@ -166,3 +166,4 @@ cython_debug/
 *.wav
 ./results_audio/
 /results_audio/
+!results_audio/*.pt
