@@ -11,7 +11,7 @@ import torchaudio
 from transfusion_pytorch import Transfusion
 
 # Config (must match training)
-SAMPLE_RATE, N_MELS, HOP_LENGTH, LATENT_DIM = 16000, 80, 256, 128
+SAMPLE_RATE, N_MELS, HOP_LENGTH, LATENT_DIM = 24000, 100, 256, 256
 MAX_FRAMES = int(4.0 * SAMPLE_RATE / HOP_LENGTH) + 1
 
 
