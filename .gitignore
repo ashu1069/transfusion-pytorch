@@ -5,10 +5,10 @@ results/
 __pycache__/
 *.py[cod]
 *$py.class
-
+data_libritts/
 # C extensions
 *.so
-
+wandb
 # Distribution / packaging
 .Python
 build/
