@@ -30,7 +30,7 @@ MIN_DURATION, MAX_DURATION = 0.5, 4.0
 TEST_MODE = False  # <-- Set to False for GPU server
 
 if TEST_MODE:
-    BATCH_SIZE, STEPS, LR, ACCUM = 2, 100, 1e-4, 1
+    BATCH_SIZE, STEPS, LR, ACCUM = 32, 100, 1e-4, 1
     SAMPLE_EVERY, CKPT_EVERY = 50, 100
     DATASET_SPLIT = "dev.clean"  # smallest split
     MAX_SAMPLES = 50  # only use 50 samples for quick testing
@@ -348,10 +348,11 @@ for step in range(start_step, STEPS + 1):
     opt.zero_grad()
     ema.update()
 
-    if step % (10 if TEST_MODE else 100) == 0 and IS_MAIN:
-        print(f"[{step}/{STEPS}] loss={loss_acc:.4f} lr={sched.get_last_lr()[0]:.2e}")
+    if step % 10 == 0 and IS_MAIN:
+        epoch = step * BATCH_SIZE * ACCUM * WORLD_SIZE / len(dataset)
+        print(f"[Step {step}/{STEPS}] [Epoch {epoch:.2f}] loss={loss_acc:.4f} lr={sched.get_last_lr()[0]:.2e}")
         if USE_WANDB:
-            wandb.log({"loss": loss_acc, "lr": sched.get_last_lr()[0]}, step=step)
+            wandb.log({"loss": loss_acc, "lr": sched.get_last_lr()[0], "epoch": epoch}, step=step)
 
     if step % SAMPLE_EVERY == 0 and IS_MAIN:
         model.eval()
